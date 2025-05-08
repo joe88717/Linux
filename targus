@@ -1,0 +1,146 @@
+## A.部屬順序
+1. redis
+2. targus-app
+3. targus-engine
+4. local-file-manager
+
+## B.所需資料
+1. Redis映像檔
+2. Targus應用(targus-app)映像檔
+   - application.properties
+   - logback.xml
+3. Targus引擎(targus-engine)映像檔
+   - .env
+4. local-file-manager映像檔
+
+
+## 補. 每一台VM部屬前注意事項
+
+### 1. 修改非root使用者的映像檔存取位置
+- 非root使用者部屬時，映像檔的預設存取路徑為'$HOME/.local/share/container/storage'，但此目錄並未分配太多容量，因此需手動調整映像檔存取位置至'/var/lib/containers'底下
+- 調整步驟:
+
+   1. (**使用root使用者或於指令前方加上`sudo`**) 建立用於存取映像檔的目錄
+
+      ```bash
+      # 建立用於存取映像檔的目錄
+      $ mkdir /var/lib/containers/targus-storage 
+
+      # 調整此目錄的SELinux設定
+      $ semanage fcontext -a -e \
+         /var/lib/containers/storage \
+         /var/lib/containers/targus-storage
+      $ restorecon -R /var/lib/containers/targus-storage
+
+      # 調整此目錄的擁有者
+      $ chown <non_root_user> -R /var/lib/containers/targus-storage
+      $ chgrp <non_root_user> -R /var/lib/containers/targus-storage
+
+      ```
+
+   2. (**使用非root使用者**) 建立設定檔
+
+      ```bash
+      # 建立存取設定檔的資料夾
+      $ mkdir $HOME/.config/containers
+      # 建立並編輯設定檔
+      $ nano $HOME/.config/containers/storage.conf
+      ```
+
+      在設定檔中加上以下內容
+
+      ```text
+      [storage]
+      driver = 'overlay'
+      graphroot = '/var/lib/containers/targus-storage'
+      ```
+
+   3. (**使用非root使用者**) 確認修改成功，並且未有`ERRO`或`WARN`
+      ```bash
+      $ podman info | grep 'graphRoot:'
+      graphRoot: /var/lib/containers/targus-storage
+      ```
+
+
+> **_NOTE_:** \
+> 執行以下部屬指令時，預設為使用non-root權限部屬容器，因此`podman`相關指令前皆未加上`sudo`。
+若要改為root權限部屬，加上`sudo`即可。 
+
+## C. Redis Server
+
+### C-1. Redis 部屬
+ 
+1. 讀取並掛載Redis映像檔案，掛載後確認是否有成功讀取。
+
+      ``` bash 
+      # 使用podman讀取image 
+      $ podman load < /path/to/redis.tar
+
+      # 確認podman映像檔，內容為範例
+      $ podman images
+      REPOSITORY    TAG       IMAGE ID       CREATED        SIZE
+      redis         7.0.15    604d80444252   8 months ago   117MB
+      ```
+
+2. 建立映射目錄並且調整目錄權限，需要root使用者或`sudo`權限
+
+   ```bash
+   # 確保自己位於根目錄中
+   $ cd /
+   # 創建映射目錄
+   $ sudo mkdir -p /var/redis/{data,config}/
+   ```
+
+   (*SELinux*) 調整SELinux相關設定
+   ```bash
+   # 設定SELinux權限
+   $ sudo semanage fcontext -a -t container_file_t '/redis(/.*)?' 
+   $ sudo restorecon -R /var/redis
+   ```
+
+   修改Redis目錄權限
+   ```
+   $ sudo chown -R <non_root_user> /var/redis
+   $ sudo chgrp -R <non_root_user> /var/redis
+   ```
+
+3. 建立Redis的設定檔，以設定Redis的認證密碼為'EYtargus2022'
+
+   ```bash
+   $ cat > /var/redis/config/redis.conf << EOF
+   > appendonly yes
+   > appendfilename "appendonly.aof"
+   > appendfsync everysec
+   > EOF
+   ```
+
+   確認檔案創建成功
+
+   ```bash
+   $ cat /var/redis/conf/redis.conf
+   appendonly yes
+   appendfilename "appendonly.aof"
+   appendfsync everysec
+   ``` 
+
+4. 啟動Redis容器。
+   #### 須注意如果redis images load 進來沒有 name，打podman images 指令確認images ID，再用ID 替換掉redis:7.0.15 整行，
+   ```bash
+   # container啟動指令
+   $ podman run -d --name redis \
+      -v /etc/localtime:/etc/localtime \
+      -v /var/redis/config:/usr/local/etc/redis \
+      -v /var/redis/data:/data \
+      -p 6379:6379 \
+      --userns keep-id:uid=999,gid=999 \
+      --log-opt max_size=10mb \
+      redis:7.0.15 \
+      redis-server /usr/local/etc/redis/redis.conf
+   
+   # container建立確認
+   $ podman ps 
+   CONTAINER ID   IMAGE         COMMAND                  CREATED         STATUS         PORTS                            NAMES
+   4f99614ee5af   redis         "podman-entrypoint.s…"   3 seconds ago   Up 2 seconds   0.0.0.0:6379->6379/tcp                            redis
+
+   # 查看redis啟動日誌
+   $ podman logs redis
